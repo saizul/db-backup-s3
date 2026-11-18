@@ -1,0 +1,41 @@
+# Production-style example: back up an existing database every night to S3-compatible storage.
+# Copy this file next to your application's compose file, put the values in a .env file
+# (see the *.env.example files in this folder) and run: docker compose up -d
+services:
+  db-backup:
+    image: ghcr.io/saizul/db-backup-s3:0.1
+    restart: unless-stopped
+    environment:
+      DB_ENGINE: ${DB_ENGINE:-postgres}       # postgres, mysql or mariadb
+      DB_HOST: ${DB_HOST:-db}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      DB_NAMES: ${DB_NAMES}                   # comma separated, or "all"
+      S3_BUCKET: ${S3_BUCKET}
+      S3_PREFIX: ${S3_PREFIX:-backups}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}   # empty for AWS S3
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY_FILE: /run/secrets/s3_secret_access_key
+      SCHEDULE: ${SCHEDULE:-0 3 * * *}        # every night at 03:00
+      SCHEDULE_TZ: ${SCHEDULE_TZ:-UTC}
+      ENCRYPTION: age
+      AGE_RECIPIENTS: ${AGE_RECIPIENTS}       # public key(s) only; keep the private key offline
+      RETENTION_KEEP_DAILY: "7"
+      RETENTION_KEEP_WEEKLY: "4"
+      RETENTION_KEEP_MONTHLY: "12"
+      HEALTHCHECK_URL_FILE: /run/secrets/healthcheck_url
+    secrets:
+      - db_password
+      - s3_secret_access_key
+      - healthcheck_url
+    # Join the network of the database you want to back up, for example:
+    # networks: [default, myapp_default]
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  s3_secret_access_key:
+    file: ./secrets/s3_secret_access_key
+  healthcheck_url:
+    file: ./secrets/healthcheck_url

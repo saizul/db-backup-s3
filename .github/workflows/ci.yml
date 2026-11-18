@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Ruff
+        run: |
+          ruff check .
+          ruff format --check .
+
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install age (for the age round-trip test)
+        run: sudo apt-get update -q && sudo apt-get install -y -q age
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+      - name: Test
+        run: pytest
+      - name: CLI smoke test
+        run: |
+          db-backup-s3 --version
+          set +e; db-backup-s3 backup; code=$?; set -e
+          test "$code" -eq 2   # missing configuration is a clear error, not a crash
+
+  integration:
+    name: End-to-end (PostgreSQL, MariaDB, MinIO)
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: db-backup-s3:ci
+      # Throwaway credentials for containers that only live during this job.
+      DB_PW: ci-only-password
+      MINIO_USER: ci-minio-user
+      MINIO_PW: ci-minio-password
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build image
+        run: docker build -t "$IMAGE" .
+      - name: Start PostgreSQL, MariaDB and MinIO
+        run: |
+          docker network create ci
+          docker run -d --name minio --network ci -e MINIO_ROOT_USER="$MINIO_USER" -e MINIO_ROOT_PASSWORD="$MINIO_PW" \
+            minio/minio server /data
+          docker run -d --name pg --network ci -e POSTGRES_PASSWORD="$DB_PW" -e POSTGRES_DB=app postgres:17-alpine
+          docker run -d --name maria --network ci -e MARIADB_ROOT_PASSWORD="$DB_PW" -e MARIADB_DATABASE=shop mariadb:11
+          for i in $(seq 1 60); do docker exec pg pg_isready -U postgres -d app && break; sleep 2; done
+          for i in $(seq 1 60); do docker exec maria healthcheck.sh --connect --innodb_initialized && break; sleep 2; done
+          for i in $(seq 1 30); do
+            docker run --rm --network ci --entrypoint sh minio/mc -c \
+              "mc alias set m http://minio:9000 $MINIO_USER $MINIO_PW && mc mb --ignore-existing m/backups" && break
+            sleep 2
+          done
+      - name: Seed data
+        run: |
+          docker exec pg psql -U postgres -d app -c "CREATE TABLE t (id int PRIMARY KEY, note text); INSERT INTO t SELECT g, md5(g::text) FROM generate_series(1, 5000) g;"
+          docker exec maria mariadb -uroot -p"$DB_PW" shop -e "CREATE TABLE t (id int PRIMARY KEY, note text); INSERT INTO t SELECT seq, md5(seq) FROM seq_1_to_5000;"
+      - name: Back up and restore PostgreSQL (AES)
+        run: |
+          run() {
+            docker run --rm --network ci \
+              -e DB_ENGINE=postgres -e DB_HOST=pg -e DB_USER=postgres -e DB_PASSWORD="$DB_PW" -e DB_NAMES=app \
+              -e S3_BUCKET=backups -e S3_ENDPOINT_URL=http://minio:9000 -e S3_FORCE_PATH_STYLE=true \
+              -e S3_ACCESS_KEY_ID="$MINIO_USER" -e S3_SECRET_ACCESS_KEY="$MINIO_PW" \
+              -e ENCRYPTION=aes -e ENCRYPTION_PASSPHRASE=ci-only-passphrase -e RETENTION_KEEP_LAST=2 \
+              "$IMAGE" "$@"
+          }
+          run check-config --connect
+          run backup
+          run backup
+          run backup
+          run list -d app
+          test "$(run list -d app --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -eq 2
+          docker exec pg createdb -U postgres app_copy
+          run restore latest -d app --target-db app_copy --yes
+          test "$(docker exec pg psql -U postgres -d app_copy -tAc 'SELECT count(*) FROM t')" -eq 5000
+      - name: Back up and restore MariaDB
+        run: |
+          run() {
+            docker run --rm --network ci \
+              -e DB_ENGINE=mariadb -e DB_HOST=maria -e DB_USER=root -e DB_PASSWORD="$DB_PW" -e DB_NAMES=shop \
+              -e DB_DUMP_EXTRA_ARGS=--skip-ssl-verify-server-cert -e DB_RESTORE_EXTRA_ARGS=--skip-ssl-verify-server-cert \
+              -e S3_BUCKET=backups -e S3_ENDPOINT_URL=http://minio:9000 -e S3_FORCE_PATH_STYLE=true \
+              -e S3_ACCESS_KEY_ID="$MINIO_USER" -e S3_SECRET_ACCESS_KEY="$MINIO_PW" \
+              "$IMAGE" "$@"
+          }
+          run backup
+          docker exec maria mariadb -uroot -p"$DB_PW" -e "CREATE DATABASE shop_copy"
+          run restore latest -d shop --target-db shop_copy --yes
+          test "$(docker exec maria mariadb -uroot -p"$DB_PW" -N -e 'SELECT count(*) FROM shop_copy.t')" -eq 5000
+      - name: Secrets never appear in the logs
+        run: |
+          out=$(docker run --rm --network ci -e DB_ENGINE=postgres -e DB_HOST=pg -e DB_USER=postgres \
+            -e DB_PASSWORD="$DB_PW" -e DB_NAMES=missing_db -e S3_BUCKET=backups -e S3_ENDPOINT_URL=http://minio:9000 \
+            -e S3_FORCE_PATH_STYLE=true -e S3_ACCESS_KEY_ID="$MINIO_USER" -e S3_SECRET_ACCESS_KEY="$MINIO_PW" \
+            "$IMAGE" backup 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "FAIL missing_db"
+          ! echo "$out" | grep -qF "$DB_PW"
+          ! echo "$out" | grep -qF "$MINIO_PW"
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs pg; docker logs maria; docker logs minio

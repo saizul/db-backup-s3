@@ -1,0 +1,55 @@
+name: Bug report
+description: A backup, restore, upload or schedule did not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Never paste passwords, access keys, passphrases or healthcheck URLs.**
+        db-backup-s3 masks them in its own logs, but double-check anything you copy from elsewhere.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: The command you ran and the log output (`LOG_LEVEL=debug` helps).
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: "Output of `db-backup-s3 check-config` (secrets are masked)."
+      render: text
+  - type: dropdown
+    id: database
+    attributes:
+      label: Database
+      options: [PostgreSQL, MariaDB, MySQL, Other]
+    validations:
+      required: true
+  - type: input
+    id: db_version
+    attributes:
+      label: Database server version
+      placeholder: "PostgreSQL 17.2 / MariaDB 11.4 / MySQL 8.4"
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage provider
+      options: [AWS S3, Cloudflare R2, Backblaze B2, MinIO, Wasabi, DigitalOcean Spaces, Other]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: db-backup-s3 version
+      description: "Output of: db-backup-s3 --version (or the image tag)"
+    validations:
+      required: true

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue
+    url: https://github.com/saizul/db-backup-s3/security/advisories/new
+    about: Please report security problems privately.
+  - name: Questions and ideas
+    url: https://github.com/saizul/db-backup-s3/discussions
+    about: Ask how to set up db-backup-s3 or share your configuration.

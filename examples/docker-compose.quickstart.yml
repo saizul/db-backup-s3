@@ -1,0 +1,63 @@
+# A complete local playground: PostgreSQL + MinIO + db-backup-s3.
+#   docker compose -f examples/docker-compose.quickstart.yml up -d
+#   docker compose -f examples/docker-compose.quickstart.yml exec backup db-backup-s3 backup
+#   docker compose -f examples/docker-compose.quickstart.yml exec backup db-backup-s3 list
+#   docker compose -f examples/docker-compose.quickstart.yml exec -T backup db-backup-s3 restore latest -d app -o - | head
+# MinIO console: http://localhost:9001 (demo-user / demo-password). Demo credentials only!
+name: db-backup-s3-demo
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: demo-password
+      POSTGRES_DB: app
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "app"]
+      interval: 2s
+      retries: 30
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: demo-user
+      MINIO_ROOT_PASSWORD: demo-password
+    ports:
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      retries: 30
+
+  create-bucket:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["sh", "-c", "mc alias set m http://minio:9000 demo-user demo-password && mc mb --ignore-existing m/backups"]
+
+  backup:
+    image: ghcr.io/saizul/db-backup-s3:latest
+    build: ..   # builds from this checkout if the image cannot be pulled
+    depends_on:
+      postgres:
+        condition: service_healthy
+      create-bucket:
+        condition: service_completed_successfully
+    environment:
+      DB_ENGINE: postgres
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: demo-password
+      DB_NAMES: app
+      S3_BUCKET: backups
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_FORCE_PATH_STYLE: "true"
+      S3_ACCESS_KEY_ID: demo-user
+      S3_SECRET_ACCESS_KEY: demo-password
+      SCHEDULE: "*/5 * * * *"
+      RUN_ON_STARTUP: "true"
+      RETENTION_KEEP_LAST: "5"
+      ENCRYPTION: aes
+      ENCRYPTION_PASSPHRASE: demo-passphrase-change-me
